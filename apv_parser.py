@@ -287,10 +287,6 @@ class APVDecoder:
             print(f"              tile_size: {tile_size}")
             self.parse_tile(subreader, i, num_comps)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="APV Bitstream Parser")
-    parser.add_argument("filepath", help="Path to the .apv bitstream file")
-    args = parser.parse_args()
-
-    decoder = APVDecoder(args.filepath)
-    decoder.parse_access_units()
+# Example usage
+decoder = APVDecoder("../test/bitstream/tile_B.apv")
+decoder.parse_access_units()

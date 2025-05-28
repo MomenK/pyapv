@@ -51,7 +51,7 @@ Access Unit (AU)
 To parse an `.apv` file, simply run:
 
 ```bash
-python3 parser.py ../openapv/test/bitstream/tile_A.apv 
+python3 apv_parser.py ../openapv/test/bitstream/tile_A.apv 
 ```
 
 The output will describe the structure and contents of each element in the bitstream.
