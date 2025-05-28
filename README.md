@@ -51,7 +51,7 @@ Access Unit (AU)
 To parse an `.apv` file, simply run:
 
 ```bash
-python apv_parser.py path/to/bitstream.apv
+python3 parser.py ../openapv/test/bitstream/tile_A.apv 
 ```
 
 The output will describe the structure and contents of each element in the bitstream.
@@ -62,25 +62,51 @@ The output will describe the structure and contents of each element in the bitst
 
 ```
 Access Unit 0:
-  Signature: APV1
-  Total size: 10240 bytes
+  Signature: aPv1
+  Total size: 3109535 bytes
     PBU 0:
-      Size     : 9000 bytes
+      Size     : 3109449 bytes
       Type     : 1 (0x01)
-      Group ID : 10
-      Payload Preview: ab cd ef 01 ...
+      Group ID : 1
+      Reserved : 0 (should be 0)
+      Payload Preview (first 16 bytes after header): 21 7b 40 00 0f 00 00 08 70 22 00 00 00 00 03 c0...
       -> Contains frame() data
         Parsing frame_header()
           frame_info():
-            frame_width: 1920
-            frame_height: 1080
-            chroma_format_idc: 3
+            profile_idc: 33
+            level_idc: 123
+            band_idc: 2
+            frame_width: 3840
+            frame_height: 2160
+            chroma_format_idc: 2
+            bit_depth: 10
+            capture_time_distance: 0
+          reserved_zero_8bits: 0
+          color_description_present_flag: 0
+          use_q_matrix: 0
           tile_info():
-            TileCols: 6, TileRows: 4, NumTiles: 24
-            tile_size_present_in_fh_flag: 1
-              tile_size_in_fh: [...]
+            tile_width_in_mbs: 240
+            tile_height_in_mbs: 135
+            TileCols: 1, TileRows: 1, NumTiles: 1
+            tile_size_present_in_fh_flag: 0
+          reserved_zero_8bits: 0
+          byte_alignment(): aligned to next byte boundary
             Parsing tile_header() for tile 0:
-              macroblock_layer at xMb=0, yMb=0, cIdx=0
+              tile_size: 3109421
+              tile_header_size: 20
+              tile_index: 0
+              tile_data_sizes: [2513604, 280304, 315493]
+              tile_qp: [30, 30, 30]
+              reserved_zero_8bits: 0
+              tile_data for component 0:
+                macroblock_layer at xMb=0, yMb=0, cIdx=0
+                  Preview: 71 52 67 2a a8 b7 c6 7a af 89 ff 24 de ca 17 12...
+              tile_data for component 1:
+                macroblock_layer at xMb=0, yMb=0, cIdx=1
+                  Preview: a3 45 f1 6f a3 2e 82 0c 23 83 ed 9b 9a 59 0b d1...
+              tile_data for component 2:
+                macroblock_layer at xMb=0, yMb=0, cIdx=2
+                  Preview: 89 4a 54 ff a0 d8 25 1d 19 07 2b 7d 07 b2 69 0a...
 ```
 
 ---
