@@ -1,5 +1,7 @@
 import struct
+import numpy as np
 import argparse
+import matplotlib.pyplot as plt
 
 class BitstreamReader:
     def __init__(self, data):
@@ -49,10 +51,162 @@ class APVDecoder:
         self.reader = BitstreamReader(self.data)
         self.frames = []
 
-    def get_num_components(self, chroma_format_idc):
+    def parse_exp_golomb(self, reader, k):
+        symbolValue = 0
+        parseExpGolomb = 1
+        stopLoop = 0
+
+        if reader.read_bit() == 1:
+            parseExpGolomb = 0
+        elif reader.read_bit() == 0:
+            symbolValue += (1 << k)
+            parseExpGolomb = 0
+        else:
+            symbolValue += (2 << k)
+            parseExpGolomb = 1
+
+        if parseExpGolomb:
+            while not stopLoop:
+                if reader.read_bit() == 1:
+                    stopLoop = 1
+                else:
+                    symbolValue += (1 << k)
+                    k += 1
+
+        if k > 0:
+            symbolValue += reader.read_bits(k)
+
+        return symbolValue
+
+    def clip(self, min_val, max_val, val):
+        return max(min_val, min(max_val, val))
+
+    def scale_transform_coefficients(self, coeff_block, cIdx, qp):
+        levelScale = [40, 45, 51, 57, 64, 71]
+        QMatrix = np.ones((8, 8), dtype=np.int32)
+        qP = qp
+        bdShift = 8 + ((3 + 3) // 2) - 5
+
+        d = np.zeros((8, 8), dtype=np.int32)
+        for y in range(8):
+            for x in range(8):
+                val = coeff_block[y][x] * QMatrix[y][x] * levelScale[qP % 6]
+                val = val << (qP // 6)
+                val = (val + (1 << (bdShift - 1))) >> bdShift
+                d[y][x] = self.clip(-32768, 32767, val)
+
+        return d
+
+    def inverse_transform(self, block):
+        transMatrix = np.array([
+            [64, 64, 64, 64, 64, 64, 64, 64],
+            [89, 75, 50, 18, -18, -50, -75, -89],
+            [84, 35, -35, -84, -84, -35, 35, 84],
+            [75, -18, -89, -50, 50, 89, 18, -75],
+            [64, -64, -64, 64, 64, -64, -64, 64],
+            [50, -89, 18, 75, -75, -18, 89, -50],
+            [35, -84, 84, -35, -35, 84, -84, 35],
+            [18, -50, 75, -89, 89, -75, 50, -18]
+        ])
+        temp = np.dot(transMatrix, block)
+        temp = (temp + 64) >> 7
+        result = np.dot(temp, transMatrix.T)
+        result = (result + 64) >> 7
+        return result
+
+    def parse_macroblock_layer(self, reader, xMb, yMb, cIdx, SubWidthC, SubHeightC, qp):
+        TrSize = 8
+        MbWidth = 16
+        MbHeight = 16
+        blkWidth = MbWidth if cIdx == 0 else MbWidth // SubWidthC
+        blkHeight = MbHeight if cIdx == 0 else MbHeight // SubHeightC
+        subW = 1 if cIdx == 0 else SubWidthC
+        subH = 1 if cIdx == 0 else SubHeightC
+        PrevDC = 0
+        PrevDcDiff = 20
+        Prev1stAcLevel = 0
+
+        for y in range(0, blkHeight, TrSize):
+            for x in range(0, blkWidth, TrSize):
+                kParam = self.clip(0, 5, PrevDcDiff >> 1)
+                abs_dc_coeff_diff = self.parse_exp_golomb(reader, kParam)
+
+                if abs_dc_coeff_diff:
+                    sign_dc_coeff_diff = reader.read_bits(1)
+                else:
+                    sign_dc_coeff_diff = 0
+
+                dc_coeff = PrevDC + abs_dc_coeff_diff * (1 - 2 * sign_dc_coeff_diff)
+                PrevDC = dc_coeff
+                PrevDcDiff = abs_dc_coeff_diff
+
+                ac_coeffs, Prev1stAcLevel = self.ac_coeff_coding(
+                    reader, xMb // subW + x, yMb // subH + y, 3, 3, cIdx, Prev1stAcLevel
+                )
+
+                full_block = [dc_coeff] + ac_coeffs
+                coeff_block = np.array(full_block).reshape(8, 8)
+                scaled_block = self.scale_transform_coefficients(coeff_block, cIdx, qp)
+                rec_block = self.inverse_transform(scaled_block)
+
+                print(f"                    Block @ ({xMb + x}, {yMb + y}), cIdx={cIdx}: coeff ->")
+                for row in coeff_block:
+                    print(f"                      {list(row)}")
+                print(f"                    Reconstructed samples:")
+                for row in rec_block:
+                    print(f"                      {list(row)}")
+
+        reader.byte_align()
+
+    def ac_coeff_coding(self, reader, x0, y0, log2BlkWidth, log2BlkHeight, cIdx, Prev1stAcLevel):
+        scanPos = 1
+        firstAC = 1
+        PrevLevel = Prev1stAcLevel
+        PrevRun = 0
+        ac_coeffs = []
+
+        while scanPos < (1 << (log2BlkWidth + log2BlkHeight)):
+            kRun = self.clip(0, 2, PrevRun >> 2)
+            coeff_zero_run = self.parse_exp_golomb(reader, kRun)
+
+            for _ in range(coeff_zero_run):
+                ac_coeffs.append(0)
+                scanPos += 1
+
+            PrevRun = coeff_zero_run
+
+            if scanPos < (1 << (log2BlkWidth + log2BlkHeight)):
+                kLevel = self.clip(0, 4, PrevLevel >> 2)
+                abs_ac_coeff_minus1 = self.parse_exp_golomb(reader, kLevel)
+                sign_ac_coeff = reader.read_bits(1)
+                level = (abs_ac_coeff_minus1 + 1) * (1 - 2 * sign_ac_coeff)
+                ac_coeffs.append(level)
+                scanPos += 1
+                PrevLevel = abs_ac_coeff_minus1 + 1
+
+                if firstAC:
+                    firstAC = 0
+                    Prev1stAcLevel = PrevLevel
+
+        return ac_coeffs, Prev1stAcLevel
+
+    def get_chroma_subsampling_factors(self,chroma_format_idc):
+        if chroma_format_idc == 0:  # 4:0:0
+            return 1, 1
+        elif chroma_format_idc == 2:  # 4:2:2
+            return 2, 1
+        elif chroma_format_idc == 3:  # 4:4:4
+            return 1, 1
+        elif chroma_format_idc == 4:  # 4:4:4:4
+            return 1, 1
+        else:
+            raise ValueError(f"Unsupported or reserved chroma_format_idc: {chroma_format_idc}")
+
+        
+    def get_num_components(self,chroma_format_idc):
         if chroma_format_idc == 0:
             return 1
-        elif chroma_format_idc == 2 or chroma_format_idc == 3:
+        elif chroma_format_idc == 2 or self.chroma_format_idc == 3:
             return 3
         elif chroma_format_idc == 4:
             return 4
@@ -161,9 +315,9 @@ class APVDecoder:
                 yMb = y0 + ((i // numMbColsInTile) * MbHeight)
                 print(f"                macroblock_layer at xMb={xMb}, yMb={yMb}, cIdx={cIdx}")
                 preview = mb_data[subreader.byte_pos:subreader.byte_pos + 16].hex(' ', 1)
-                print(f"                  Preview: {preview}...")
-                # Skipping full macroblock_layer parsing
-                break
+                # print(f"                  Preview: {preview}...")
+                SubWidthC, SubHeightC = self.get_chroma_subsampling_factors(self.chroma_format_idc)
+                self.parse_macroblock_layer(subreader, xMb, yMb, cIdx, SubWidthC, SubHeightC,tile_qps[i])
             subreader.byte_align()
 
         dummy_count = 0
@@ -187,10 +341,10 @@ class APVDecoder:
         frame_height = int.from_bytes(reader.read_bytes(3), 'big')
 
         byte = int.from_bytes(reader.read_bytes(1), 'big')
-        chroma_format_idc = (byte >> 4) & 0x0F
+        self.chroma_format_idc = (byte >> 4) & 0x0F
         bit_depth_minus8 = byte & 0x0F
 
-        num_comps = self.get_num_components(chroma_format_idc)
+        num_comps = self.get_num_components(self.chroma_format_idc)
 
         capture_time_distance = int.from_bytes(reader.read_bytes(1), 'big')
         reserved_zero_8bits = int.from_bytes(reader.read_bytes(1), 'big')
@@ -201,7 +355,7 @@ class APVDecoder:
         print(f"            band_idc: {band_idc}")
         print(f"            frame_width: {frame_width}")
         print(f"            frame_height: {frame_height}")
-        print(f"            chroma_format_idc: {chroma_format_idc}")
+        print(f"            chroma_format_idc: {self.chroma_format_idc}")
         print(f"            bit_depth: {bit_depth_minus8 + 8}")
         print(f"            capture_time_distance: {capture_time_distance}")
 
@@ -288,5 +442,10 @@ class APVDecoder:
             self.parse_tile(subreader, i, num_comps)
 
 # Example usage
-decoder = APVDecoder("../test/bitstream/tile_B.apv")
-decoder.parse_access_units()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="APV Bitstream Parser")
+    parser.add_argument("filepath", help="Path to the .apv bitstream file")
+    args = parser.parse_args()
+
+    decoder = APVDecoder(args.filepath)
+    decoder.parse_access_units()
