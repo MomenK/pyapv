@@ -83,6 +83,177 @@ class BitstreamReader:
             symbol_value += self.read_bits(k)
 
         return symbol_value
+    
+class TileComp:
+    def __init__(self, cIdx, reader : BitstreamReader, configs):
+        self.reader = reader
+        self.configs = configs
+
+        self.x0 = 0 #Time coordinates
+        self.y0 = 0 #Not coordinates
+    
+        self.MbWidth = 16
+        self.MbHeight = 16
+        self.TrSize = 8
+        self.subW = 1 if cIdx == 0 else configs["SubWidthC"]
+        self.subH = 1 if cIdx == 0 else configs["SubHeightC"]
+        self.blkWidth    = self.MbWidth  if cIdx == 0 else self.MbWidth  // configs["SubWidthC"]
+        self.blkHeight   = self.MbHeight if cIdx == 0 else self.MbHeight // configs["SubHeightC"]
+        self.qp = configs["QP"]
+
+
+        self.PrevDC = 0
+        self.PrevDCDiff = 20
+        self.Prev1stAcLevel = 0
+
+        # tile_height =  (self.configs["numMbsInTile"] // self.configs["numMbColsInTile"]) * self.blkHeight
+        # tile_width  =  self.configs["numMbColsInTile"] * self.blkWidth
+        tile_height =  (self.configs["numMbsInTile"] // self.configs["numMbColsInTile"]) * self.MbHeight
+        tile_width  =  self.configs["numMbColsInTile"] * self.MbWidth 
+
+        print(f"Creating image buffer of size {tile_height} X {tile_width} for component {cIdx}")
+        self.rec_samples = np.zeros((tile_height,tile_width), dtype=np.uint8) #TODO: Correct datatype?
+
+
+    def decode(self):
+        # macroblock_layer iteration.
+        for i in range(self.configs["numMbsInTile"]):
+            xMb = self.x0 + ((i % self.configs["numMbColsInTile"]) * self.MbWidth)
+            yMb = self.y0 + ((i // self.configs["numMbColsInTile"]) * self.MbHeight)
+            # print(f"                macroblock_layer at xMb={xMb}, yMb={yMb} {i}/{self.configs['numMbsInTile']} - MB={self.blkHeight} x {self.blkWidth} ")
+
+
+            self.TransCoeff = np.zeros((self.TrSize, self.TrSize), dtype=np.int32)
+
+            for y in range(0, self.blkHeight, self.TrSize):
+                for x in range(0, self.blkWidth, self.TrSize):
+                    #Entropy
+
+                    # print(f" start dc_coeff_coding")
+                    kParam = self.clip(0, 5, self.PrevDCDiff >> 1)
+                    abs_dc_coeff_diff = self.reader.parse_exp_golomb(kParam)
+                    
+                    if abs_dc_coeff_diff:
+                        sign_dc_coeff_diff = self.reader.read_bit()
+                    else:
+                        sign_dc_coeff_diff = 0
+                    self.TransCoeff[0][0] = self.PrevDC + abs_dc_coeff_diff * (1 - (2 * sign_dc_coeff_diff))
+                    self.PrevDC = self.TransCoeff[0][0]
+                    self.PrevDCDiff = abs_dc_coeff_diff
+
+
+                    # print(f" start ac_coeff_coding")
+                    log2BlkWidth  = 3 # log2(self.TrSize)
+                    log2BlkHeight = 3 # log2(self.TrSize)
+
+                    scanPos = 1
+                    firstAC = 1
+                    PrevLevel = self.Prev1stAcLevel
+                    PrevRun = 0
+
+                    blk_size = 1 << (log2BlkWidth + log2BlkHeight)
+                    width = 1 << log2BlkWidth
+                    height = 1 << log2BlkHeight
+
+                    ScanOrder = [
+                        0,  1,  8, 16,  9,  2,  3, 10,
+                        17, 24, 32, 25, 18, 11,  4,  5,
+                        12, 19, 26, 33, 40, 48, 41, 34,
+                        27, 20, 13,  6,  7, 14, 21, 28,
+                        35, 42, 49, 56, 57, 50, 43, 36,
+                        29, 22, 15, 23, 30, 37, 44, 51,
+                        58, 59, 52, 45, 38, 31, 39, 46,
+                        53, 60, 61, 54, 47, 55, 62, 63
+                    ]
+
+
+                    while scanPos < blk_size:
+                        kRun = self.clip(0, 2, PrevRun >> 2)
+                        coeff_zero_run = self.reader.parse_exp_golomb(kRun)
+
+                        for _ in range(coeff_zero_run):
+                            blkPos = ScanOrder[scanPos]
+                            xC = blkPos & (width - 1)
+                            yC = blkPos >> log2BlkWidth
+                            self.TransCoeff[yC][xC] = 0
+                            scanPos += 1
+
+                        PrevRun = coeff_zero_run
+
+                        if scanPos < blk_size:
+                            kLevel = self.clip(0, 4, PrevLevel >> 2)
+                            abs_ac_coeff_minus1 = self.reader.parse_exp_golomb(kLevel)
+                            sign_ac_coeff = self.reader.read_bits(1)
+                            level = (abs_ac_coeff_minus1 + 1) * (1 - (2 * sign_ac_coeff))
+
+                            blkPos = ScanOrder[scanPos]
+                            xC = blkPos & (width - 1)
+                            yC = blkPos >> log2BlkWidth
+                            self.TransCoeff[yC][xC] = level
+                            scanPos += 1
+
+                            PrevLevel = abs_ac_coeff_minus1 + 1
+                            if firstAC:
+                                firstAC = 0
+                                self.Prev1stAcLevel = PrevLevel
+                        if (scanPos >= blk_size): 
+                            break
+                
+                    #Compute
+                    scaled_block = self.scale_transform_coefficients(self.TransCoeff)
+                    rec_block = self.inverse_transform(scaled_block)
+
+                    #Store data in local memory
+                    if hasattr(self, 'rec_samples') and self.rec_samples is not None:
+                        for i in range(self.TrSize):
+                            for j in range(self.TrSize):
+                                yy = yMb // self.subH + y + i
+                                xx = xMb // self.subW + x + j
+                                if 0 <= yy < self.rec_samples.shape[0] and 0 <= xx < self.rec_samples.shape[1]:
+                                    # print(f"                    Writing into frame buffer component value {self.clip(0, 255, rec_block[i, j])}")
+                                    self.rec_samples[yy, xx] = self.clip(0, 255, rec_block[i, j])
+
+    def dump_data(self):
+        return self.rec_samples
+
+
+    def clip(self, min_val, max_val, val):
+        return max(min_val, min(max_val, val))
+
+    def scale_transform_coefficients(self, coeff_block):
+        levelScale = [40, 45, 51, 57, 64, 71]
+        QMatrix = np.ones((8, 8), dtype=np.int32)
+        qP = self.qp
+        bdShift = 8 + ((3 + 3) // 2) - 5
+
+        d = np.zeros((8, 8), dtype=np.int32)
+        for y in range(8):
+            for x in range(8):
+                val = coeff_block[y][x] * QMatrix[y][x] * levelScale[qP % 6]
+                val = val << (qP // 6)
+                val = (val + (1 << (bdShift - 1))) >> bdShift
+                d[y][x] = self.clip(-32768, 32767, val)
+
+        return d
+
+    def inverse_transform(self, block):
+        transMatrix = np.array([
+            [64, 64, 64, 64, 64, 64, 64, 64],
+            [89, 75, 50, 18, -18, -50, -75, -89],
+            [84, 35, -35, -84, -84, -35, 35, 84],
+            [75, -18, -89, -50, 50, 89, 18, -75],
+            [64, -64, -64, 64, 64, -64, -64, 64],
+            [50, -89, 18, 75, -75, -18, 89, -50],
+            [35, -84, 84, -35, -35, 84, -84, 35],
+            [18, -50, 75, -89, 89, -75, 50, -18]
+        ])
+        temp = np.dot(transMatrix, block)
+        temp = (temp + 64) >> 7
+        result = np.dot(temp, transMatrix.T)
+        result = (result + 64) >> 7
+        return result
+
+
 
 class APVDecoder:
     def __init__(self, filepath):
@@ -458,6 +629,8 @@ class APVDecoder:
         SubWidthC, SubHeightC = self.get_chroma_subsampling_factors(self.chroma_format_idc)
 
         for cIdx in range(num_comps):
+            # Parallelism breaks at tile component
+            # Need a TileComp Class: has a bitstream/entropy decoder and compute functions.
             print(f"              tile_data for component {cIdx}:")
             mb_data = reader.read_bytes(tile_data_sizes[cIdx])
             self.mb_reader = BitstreamReader(mb_data)
@@ -466,6 +639,26 @@ class APVDecoder:
             self.PrevDCDiff = 20
             self.Prev1stAcLevel = 0
 
+            # configs = {
+            #     "SubWidthC":       SubWidthC,
+            #     "SubHeightC":      SubHeightC,
+            #     "numMbColsInTile": numMbColsInTile,
+            #     "numMbsInTile":    max_mbs_in_tile,
+            #     "QP":              tile_qps[cIdx],
+            # }
+            # tile_comp = TileComp(cIdx,self.mb_reader, configs)
+            # tile_comp.decode()
+            
+            # TODO: Fix bug in chroma remapping
+            # if hasattr(self, 'rec_samples') and self.rec_samples[cIdx] is not None:
+            #     for i in range(numMbRowsInTile * 16):
+            #         for j in range(numMbColsInTile * 16):
+            #             yy = y0 + i
+            #             xx = x0 + j
+            #             if 0 <= yy < self.rec_samples[cIdx].shape[0] and 0 <= xx < self.rec_samples[cIdx].shape[1]:
+            #                 # print(f"                    Writing into frame buffer component {cIdx} value {self.clip(0, 255, rec_block[i, j])}")
+            #                 self.rec_samples[cIdx][yy, xx] = tile_comp.dump_data()[i,j]
+        
             for i in range(max_mbs_in_tile):
                 xMb = x0 + ((i % numMbColsInTile) * MbWidth)
                 yMb = y0 + ((i // numMbColsInTile) * MbHeight)
@@ -474,7 +667,7 @@ class APVDecoder:
                 # print(f"                  Preview: {preview}...")
                 
                 self.parse_macroblock_layer(xMb, yMb, cIdx, SubWidthC, SubHeightC,tile_qps[cIdx])
-            # self.save_frame_as_image("frame_output.png")
+
             reader.byte_align()
 
         dummy_count = 0
@@ -600,18 +793,42 @@ class APVDecoder:
             print(f"              tile_size: {tile_size}")
             self.parse_tile(subreader, i, num_comps)
         
-        self.save_frame_as_image("frame_output.png")
+        self.save_frame_as_image("frame_output.png",SubWidthC, SubHeightC)
 
-    def save_frame_as_image(self, filename):
+    def save_frame_as_image(self, filename,SubWidthC, SubHeightC):
         if len(self.rec_samples) >= 3:
             y, cb, cr = self.rec_samples[:3]
+            # print(f"{SubWidthC}, {SubHeightC}")
+            if SubHeightC==2:
+                cr = np.repeat( cr, 2, axis=0)
+                cb = np.repeat( cb, 2, axis=0)
+            if SubWidthC==2:
+                cr = np.repeat( cr, 2, axis=1)
+                cb = np.repeat( cb, 2, axis=1)
+
+            print(f"{y.shape} {cr.shape}  {cb.shape}  ")
             # cb_resized = np.repeat(np.repeat(cb, 2, axis=0), 2, axis=1)
             # cr_resized = np.repeat(np.repeat(cr, 2, axis=0), 2, axis=1)
-            # ycbcr = np.stack((y, cb_resized, cr_resized), axis=2).astype(np.uint8)
-            # rgb = self.ycbcr_to_rgb(ycbcr)
-            plt.imshow(y, cmap='gray')
-            plt.title("Reconstructed Luma (Y)")
+            ycbcr = np.stack((y, cb, cr), axis=2).astype(np.uint8)
+            rgb = self.ycbcr_to_rgb(ycbcr)
+            plt.imshow(rgb)
+            # plt.title("Reconstructed Luma (Y)")
             plt.axis("off")
+            plt.show()
+            fig, axes = plt.subplots(1, 3, figsize=(12, 4))   # 1 row × 3 cols
+
+            planes = [
+                (y,  "Reconstructed Luma (Y)"),
+                (cb, "Reconstructed Chroma (Cb)"),
+                (cr, "Reconstructed Chroma (Cr)"),
+            ]
+
+            for ax, (img, title) in zip(axes, planes):
+                ax.imshow(img, cmap='gray')
+                ax.set_title(title)
+                ax.axis('off')
+
+            plt.tight_layout()
             plt.show()
 
             # img = Image.fromarray(y, 'RGB')
