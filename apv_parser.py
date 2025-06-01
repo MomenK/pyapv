@@ -116,7 +116,7 @@ class TileComp:
         tile_width  =  self.configs["numMbColsInTile"] * self.MbWidth 
 
         print(f"Creating image buffer of size {tile_height} X {tile_width} for component {cIdx}")
-        self.rec_samples = np.zeros((tile_height,tile_width), dtype=np.int16) #TODO: Correct datatype?
+        self.rec_samples = np.zeros((tile_height,tile_width), dtype=np.uint16)
 
 
     def decode(self):
@@ -245,6 +245,7 @@ class TileComp:
                 val = val << (qP // 6)
                 val = (val + (1 << (bdShift - 1))) >> bdShift
                 d[y][x] = self.clip(-32768, 32767, val)
+                # d[x][y] = self.clip(-32768, 32767,((coeff_block[x][y] * QMatrix[x][y] * levelScale[qP % 6] << (qP//6)) + (1 << (bdShift-1)) >> bdShift))
 
         return d
 
@@ -278,7 +279,7 @@ class APVDecoder:
         for cIdx in range(num_comps):
             w = width if cIdx == 0 else width // SubWidthC
             h = height if cIdx == 0 else height // SubHeightC
-            self.rec_samples.append(np.zeros((h, w), dtype=np.int16))
+            self.rec_samples.append(np.zeros((h, w), dtype=np.uint16))
     
     
     def clip(self, min_val, max_val, val):
@@ -574,7 +575,7 @@ class APVDecoder:
         y8, cb8, cr8 = self._prepare_planes_for_display(
             y, cb, cr,
             bit_depth = self.BitDepth,
-            full_range = False
+            full_range = True
         )
 
         # --- 3)  YCbCr → RGB  (BT.601 full-swing) ---------------
@@ -603,6 +604,18 @@ class APVDecoder:
         Image.fromarray(rgb, 'RGB').save(filename)
         print(f"saved reconstructed frame → {filename}")
 
+        yuv_name = "test.yuv"
+        out_dtype = np.dtype('<u2')
+        with open(yuv_name, "wb") as fp:
+            # # Y plane (original resolution, original bit-depth → little-endian)
+            fp.write(y.astype(out_dtype if self.BitDepth > 8 else np.uint8).tobytes())
+            # # Re-sub-sample Cb/Cr back to native resolution before dumping
+            cb_native = cb[::sub_h, ::sub_w]
+            cr_native = cr[::sub_h, ::sub_w]
+            fp.write(cb_native.astype(out_dtype if self.BitDepth > 8 else np.uint8).tobytes())
+            fp.write(cr_native.astype(out_dtype if self.BitDepth > 8 else np.uint8).tobytes())
+
+        print(f"Raw YUV ({self.BitDepth}-bit planar) saved → {yuv_name}")
     # ------------------------------------------------------------
     def _prepare_planes_for_display(self,
                                     y, cb, cr,
@@ -632,8 +645,8 @@ class APVDecoder:
 
         # --- chroma ----------------------------------------------
         if full_range:
-            cb8 = (cb / scale) + 128         # centre at 128
-            cr8 = (cr / scale) + 128
+            cb8 = (cb / scale)
+            cr8 = (cr / scale)
         else:
             # video-range (16-240); undo offset & rescale
             c_offset = 128 * scale
