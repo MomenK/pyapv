@@ -212,8 +212,10 @@ class TileComp:
                     bdShift = (20 - self.BitDepth)
                     for ix in range(self.TrSize):
                         for jy in range(self.TrSize):
-                            val =  ((rec_block[ix,jy]+(1 << (bdShift-1)))>>bdShift) + (1 << (self.BitDepth-1))
-                            rec_block[ix,jy] = self.clip(0, (1 << self.BitDepth)-1, val)
+                            val =  (rec_block[ix,jy] + (1 << (bdShift - 1))) >> bdShift
+                            mid_val = (1 << (self.BitDepth - 1))
+                            max_val = (1 << self.BitDepth) - 1
+                            rec_block[ix,jy] = self.clip(0, max_val, val + mid_val)
 
                     #Store data in local memory
                     if hasattr(self, 'rec_samples') and self.rec_samples is not None:
@@ -240,10 +242,9 @@ class TileComp:
         d = np.zeros((8, 8), dtype=np.int32)
         for y in range(8):
             for x in range(8):
-                val = coeff_block[y][x] * self.QMatrix[y][x] * levelScale[qP % 6]
-                val = val << (qP // 6)
+                val = (coeff_block[y][x] * self.QMatrix[y][x] * levelScale[qP % 6]) << (qP // 6)
                 val = (val + (1 << (bdShift - 1))) >> bdShift
-                d[y][x] = self.clip(-32768, 32767, val)
+                d[y][x] = self.clip(-32768, 32767, val) #int16
                 # d[x][y] = self.clip(-32768, 32767,((coeff_block[x][y] * QMatrix[x][y] * levelScale[qP % 6] << (qP//6)) + (1 << (bdShift-1)) >> bdShift))
 
         return d
