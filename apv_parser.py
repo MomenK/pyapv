@@ -490,7 +490,7 @@ class APVDecoder:
                 for y in range(8):
                     for x in range(8):
                         # read one byte and store it
-                        self.q_matrix[comp, y, x] = reader.read_bytes(1)[0]
+                        self.q_matrix[comp, y, x] = reader.read_bits(8)
                     print(f"                {self.q_matrix[comp, y].tolist()}")
         else:
             self.q_matrix = np.ones((3, 8, 8), dtype=np.int8)*16
