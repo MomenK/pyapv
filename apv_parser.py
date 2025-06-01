@@ -103,7 +103,7 @@ class TileComp:
         self.qp = configs["QP"]
         self.BitDepth = configs["bit_depth_minus8"] + 8
         self.QpBdOffset = configs["bit_depth_minus8"] * 6
-        print(f"Tile Comp BitDepth {self.BitDepth} - clip to {(1 << self.BitDepth)-1}")
+        self.QMatrix = configs["QMatrix"]
 
 
         self.PrevDC = 0
@@ -204,12 +204,12 @@ class TileComp:
                             break
                 
                     #Compute
-                    #- dequant
+                    #- Inverse quantization
                     scaled_block = self.scale_transform_coefficients(self.TransCoeff)
-                    #- Transform
+                    #- Inverse transform
                     rec_block = self.inverse_transform(scaled_block)
-                    #- scale
-                    bdShift = 20 - self.BitDepth
+                    #- Reconstruction scaling
+                    bdShift = (20 - self.BitDepth)
                     for ix in range(self.TrSize):
                         for jy in range(self.TrSize):
                             val =  ((rec_block[ix,jy]+(1 << (bdShift-1)))>>bdShift) + (1 << (self.BitDepth-1))
@@ -234,14 +234,13 @@ class TileComp:
 
     def scale_transform_coefficients(self, coeff_block):
         levelScale = [40, 45, 51, 57, 64, 71]
-        QMatrix = np.ones((8, 8), dtype=np.int32)
-        qP = self.qp + self.QpBdOffset
-        bdShift = self.BitDepth  + ((3 + 3) // 2) - 5
+        qP = self.qp
+        bdShift = self.BitDepth  - 2 #+ ((3 + 3) // 2) - 5
 
         d = np.zeros((8, 8), dtype=np.int32)
         for y in range(8):
             for x in range(8):
-                val = coeff_block[y][x] * QMatrix[y][x] * levelScale[qP % 6]
+                val = coeff_block[y][x] * self.QMatrix[y][x] * levelScale[qP % 6]
                 val = val << (qP // 6)
                 val = (val + (1 << (bdShift - 1))) >> bdShift
                 d[y][x] = self.clip(-32768, 32767, val)
@@ -397,12 +396,13 @@ class APVDecoder:
             print (f"             tile_data for component {cIdx}: {mb_data.remaining_bytes()} Bytes")
 
             configs = {
-                "SubWidthC":       SubWidthC,
-                "SubHeightC":      SubHeightC,
-                "numMbColsInTile": numMbColsInTile,
-                "numMbsInTile":    max_mbs_in_tile,
-                "QP":              tile_qps[cIdx],
-                "bit_depth_minus8" : self.bit_depth_minus8
+                "SubWidthC"         : SubWidthC,
+                "SubHeightC"        : SubHeightC,
+                "numMbColsInTile"   : numMbColsInTile,
+                "numMbsInTile"      : max_mbs_in_tile,
+                "QP"                : tile_qps[cIdx],
+                "bit_depth_minus8"  : self.bit_depth_minus8,
+                "QMatrix"           : self.q_matrix[cIdx]
             }
             tile_comp = TileComp(cIdx,mb_data, configs)
             tile_comp.decode()
@@ -482,12 +482,17 @@ class APVDecoder:
         print(f"          use_q_matrix: {use_q_matrix}")
 
         if use_q_matrix:
+            self.q_matrix = np.ones((3, 8, 8), dtype=np.int8) 
             print(f"            quantization_matrix():")
-            for comp in range(3):
+            for comp in range(num_comps):
                 print(f"              Component {comp}:")
                 for y in range(8):
-                    row = [int.from_bytes(reader.read_bytes(1), 'big') for x in range(8)]
-                    print(f"                {row}")
+                    for x in range(8):
+                        # read one byte and store it
+                        self.q_matrix[comp, y, x] = reader.read_bytes(1)[0]
+                    print(f"                {self.q_matrix[comp, y].tolist()}")
+        else:
+            self.q_matrix = np.ones((3, 8, 8), dtype=np.int8)*16
 
         print("          tile_info():")
         tile_width_in_mbs = reader.read_bits(20)
