@@ -101,6 +101,9 @@ class TileComp:
         self.blkWidth    = self.MbWidth  if cIdx == 0 else self.MbWidth  // configs["SubWidthC"]
         self.blkHeight   = self.MbHeight if cIdx == 0 else self.MbHeight // configs["SubHeightC"]
         self.qp = configs["QP"]
+        self.BitDepth = configs["bit_depth_minus8"] + 8
+        self.QpBdOffset = configs["bit_depth_minus8"] * 6
+        print(f"Tile Comp BitDepth {self.BitDepth} - clip to {(1 << self.BitDepth)-1}")
 
 
         self.PrevDC = 0
@@ -201,8 +204,16 @@ class TileComp:
                             break
                 
                     #Compute
+                    #- dequant
                     scaled_block = self.scale_transform_coefficients(self.TransCoeff)
+                    #- Transform
                     rec_block = self.inverse_transform(scaled_block)
+                    #- scale
+                    bdShift = 20 - self.BitDepth
+                    for ix in range(self.TrSize):
+                        for jy in range(self.TrSize):
+                            val =  ((rec_block[ix,jy]+(1 << (bdShift-1)))>>bdShift) + (1 << (self.BitDepth-1))
+                            rec_block[ix,jy] = self.clip(0, (1 << self.BitDepth)-1, val)
 
                     #Store data in local memory
                     if hasattr(self, 'rec_samples') and self.rec_samples is not None:
@@ -224,8 +235,8 @@ class TileComp:
     def scale_transform_coefficients(self, coeff_block):
         levelScale = [40, 45, 51, 57, 64, 71]
         QMatrix = np.ones((8, 8), dtype=np.int32)
-        qP = self.qp
-        bdShift = 8 + ((3 + 3) // 2) - 5
+        qP = self.qp + self.QpBdOffset
+        bdShift = self.BitDepth  + ((3 + 3) // 2) - 5
 
         d = np.zeros((8, 8), dtype=np.int32)
         for y in range(8):
@@ -239,19 +250,18 @@ class TileComp:
 
     def inverse_transform(self, block):
         transMatrix = np.array([
-            [64, 64, 64, 64, 64, 64, 64, 64],
-            [89, 75, 50, 18, -18, -50, -75, -89],
-            [84, 35, -35, -84, -84, -35, 35, 84],
-            [75, -18, -89, -50, 50, 89, 18, -75],
-            [64, -64, -64, 64, 64, -64, -64, 64],
-            [50, -89, 18, 75, -75, -18, 89, -50],
-            [35, -84, 84, -35, -35, 84, -84, 35],
-            [18, -50, 75, -89, 89, -75, 50, -18]
+            [  64,  64,  64,  64,  64,  64,  64,  64 ],
+            [  89,  75,  50,  18, -18, -50, -75, -89 ],
+            [  84,  35, -35, -84, -84, -35,  35,  84 ],
+            [  75, -18, -89, -50,  50,  89,  18, -75 ],
+            [  64, -64, -64,  64,  64, -64, -64,  64 ],
+            [  50, -89,  18,  75, -75, -18,  89, -50 ],
+            [  35, -84,  84, -35, -35,  84, -84,  35 ],
+            [  18, -50,  75, -89,  89, -75,  50, -18 ]
         ])
-        temp = np.dot(transMatrix, block)
-        temp = (temp + 64) >> 7
-        result = np.dot(temp, transMatrix.T)
-        result = (result + 64) >> 7
+        e_arr = np.dot(transMatrix.T, block)
+        g_arr = (e_arr + 64) >> 7
+        result = np.dot(g_arr, transMatrix)
         return result
 
 
@@ -391,6 +401,7 @@ class APVDecoder:
                 "numMbColsInTile": numMbColsInTile,
                 "numMbsInTile":    max_mbs_in_tile,
                 "QP":              tile_qps[cIdx],
+                "bit_depth_minus8" : self.bit_depth_minus8
             }
             tile_comp = TileComp(cIdx,mb_data, configs)
             tile_comp.decode()
@@ -431,7 +442,8 @@ class APVDecoder:
 
         byte = int.from_bytes(reader.read_bytes(1), 'big')
         self.chroma_format_idc = (byte >> 4) & 0x0F
-        bit_depth_minus8 = byte & 0x0F
+        self.bit_depth_minus8 = byte & 0x0F
+        self.BitDepth = self.bit_depth_minus8 + 8
 
         num_comps, SubWidthC, SubHeightC = self.parse_chroma_format_idc(self.chroma_format_idc)
         self.setup_frame_buffers(frame_width, frame_height, num_comps, SubWidthC, SubHeightC)
@@ -446,7 +458,7 @@ class APVDecoder:
         print(f"            frame_width: {frame_width}")
         print(f"            frame_height: {frame_height}")
         print(f"            chroma_format_idc: {self.chroma_format_idc}")
-        print(f"            bit_depth: {bit_depth_minus8 + 8}")
+        print(f"            bit_depth: {self.bit_depth_minus8 + 8}")
         print(f"            capture_time_distance: {capture_time_distance}")
 
         reserved0 = int.from_bytes(reader.read_bytes(1), 'big')
@@ -533,83 +545,122 @@ class APVDecoder:
         
         self.save_frame_as_image("frame_output.png",SubWidthC, SubHeightC)
 
-    def save_frame_as_image(self, filename,SubWidthC, SubHeightC):
-        if len(self.rec_samples) >= 3:
-            y, cb, cr = self.rec_samples[:3]
-            # print(f"{SubWidthC}, {SubHeightC}")
-            if SubHeightC==2:
-                cb = np.repeat( cb, 2, axis=0)
-                cr = np.repeat( cr, 2, axis=0)
-            if SubWidthC==2:
-                cb = np.repeat( cb, 2, axis=1)
-                cr = np.repeat( cr, 2, axis=1)
-
-            print(f"{y.shape} {cr.shape}  {cb.shape}  ")
-            # cb_resized = np.repeat(np.repeat(cb, 2, axis=0), 2, axis=1)
-            # cr_resized = np.repeat(np.repeat(cr, 2, axis=0), 2, axis=1)
-
-            # --- 2)  add 128 offsets & clip into uint8 --------------------
-            y8, cb8, cr8 = self._prepare_planes_for_display(y, cb, cr,
-                                                            full_range=False)
-
-            # --- 3)  YCbCr → RGB  (BT.601 full-swing) ---------------------
-            ycbcr = np.stack((y8, cb8, cr8), axis=2)
-            rgb   = self.ycbcr_to_rgb(ycbcr)          # result already uint8
-
-            print(f"{rgb.shape}")
-            plt.imshow(rgb)
-            # plt.title("Reconstructed Luma (Y)")
-            plt.axis("off")
-            plt.show()
-            fig, axes = plt.subplots(1, 3, figsize=(12, 4))   # 1 row × 3 cols
-
-            planes = [
-                (y,  "Reconstructed Luma (Y)"),
-                (cb, "Reconstructed Chroma (Cb)"),
-                (cr, "Reconstructed Chroma (Cr)"),
-            ]
-
-            for ax, (img, title) in zip(axes, planes):
-                ax.imshow(img, cmap='gray')
-                ax.set_title(title)
-                ax.axis('off')
-
-            plt.tight_layout()
-            plt.show()
-
-            Image.fromarray(rgb).save('binary_rgb.png')    # default mode='RGB'
-
-            # img = Image.fromarray(y, 'RGB')
-            # img.save(filename)
-            # print(f"Saved reconstructed frame to {filename}")
-
-    def _prepare_planes_for_display(self, y, cb, cr, full_range=False):
+    # ------------------------------------------------------------
+    #  Display helpers
+    # ------------------------------------------------------------
+    def save_frame_as_image(self, filename, sub_w, sub_h):
         """
-        * Adds 128 to luma (if not full-range) and 128 to Cb/Cr.
-        * Clips to 0-255 and converts to uint8.
-        """
-        if not full_range:
-            y  = y  + 128.0                # shift luma up
-        cb = cb + 128.0
-        cr = cr + 128.0
-        return (np.clip(0,255,y).astype(np.int16),
-                np.clip(0,255,cb).astype(np.int16),
-                np.clip(0,255,cr).astype(np.int16))
-    
-    def ycbcr_to_rgb(self, ycbcr):
-        """
-        BT.601 full-range conversion (values are uint8 in 0‥255).
-        """
-        y = ycbcr[...,0].astype(np.int16)
-        cb= ycbcr[...,1].astype(np.int16) - 128
-        cr= ycbcr[...,2].astype(np.int16) - 128
+        Upsample chroma, map bit-depth → 8-bit, convert YCbCr→RGB and save.
 
-        r = y +             1.402 * cr
-        g = y - 0.344136 * cb - 0.714136 * cr
-        b = y + 1.772    * cb
+        Parameters
+        ----------
+        sub_w, sub_h : int
+            Horizontal / vertical chroma subsampling factors (1 or 2).
+        """
+        if len(self.rec_samples) < 3:               # need at least Y,Cb,Cr
+            return
 
-        rgb = np.stack((r,g,b), axis=2)
-        return np.clip(rgb, 0, 255).astype(np.uint8)
+        y, cb, cr = self.rec_samples[:3]
+
+        # --- 1)  rebuild full-size chroma planes -----------------
+        if sub_h == 2:
+            cb = np.repeat(cb, 2, axis=0)
+            cr = np.repeat(cr, 2, axis=0)
+        if sub_w == 2:
+            cb = np.repeat(cb, 2, axis=1)
+            cr = np.repeat(cr, 2, axis=1)
+
+        # --- 2)  bit-depth → 8-bit + add offsets ----------------
+        y8, cb8, cr8 = self._prepare_planes_for_display(
+            y, cb, cr,
+            bit_depth = self.BitDepth,
+            full_range = False
+        )
+
+        # --- 3)  YCbCr → RGB  (BT.601 full-swing) ---------------
+        rgb = self.ycbcr_to_rgb(np.stack((y8, cb8, cr8), axis=2))
+        print(f"{rgb.shape}")
+        plt.imshow(rgb)
+        # plt.title("Reconstructed Luma (Y)")
+        plt.axis("off")
+        plt.show()
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))   # 1 row × 3 cols
+
+        planes = [
+            (y,  "Reconstructed Luma (Y)"),
+            (cb, "Reconstructed Chroma (Cb)"),
+            (cr, "Reconstructed Chroma (Cr)"),
+        ]
+
+        for ax, (img, title) in zip(axes, planes):
+            ax.imshow(img, cmap='gray')
+            ax.set_title(title)
+            ax.axis('off')
+
+        plt.tight_layout()
+        plt.show()
+
+        Image.fromarray(rgb, 'RGB').save(filename)
+        print(f"saved reconstructed frame → {filename}")
+
+    # ------------------------------------------------------------
+    def _prepare_planes_for_display(self,
+                                    y, cb, cr,
+                                    *,
+                                    bit_depth: int,
+                                    full_range: bool = False):
+        """
+        • converts any bit-depth (8/10/12/…) luma & chroma planes to 8-bit
+        • adds / removes video-range offsets when *full_range == False*
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray, np.ndarray]  ––  uint8 Y, Cb, Cr
+        """
+        # scale factor between source bit-depth and 8-bit
+        shift = bit_depth - 8
+        scale = 1 << shift                   # e.g. 10-bit → 4, 12-bit → 16
+
+        # --- luma ------------------------------------------------
+        if full_range:
+            y8 = (y / scale)
+        else:
+            # video-range (16-235); undo offset & rescale
+            y_offset = 16  * scale
+            y_range  = 219 * scale
+            y8 = (y - y_offset) * 255.0 / y_range
+
+        # --- chroma ----------------------------------------------
+        if full_range:
+            cb8 = (cb / scale) + 128         # centre at 128
+            cr8 = (cr / scale) + 128
+        else:
+            # video-range (16-240); undo offset & rescale
+            c_offset = 128 * scale
+            c_range  = 224 * scale
+            cb8 = (cb - c_offset) * 255.0 / c_range + 128
+            cr8 = (cr - c_offset) * 255.0 / c_range + 128
+
+        # clip & uint8
+        return (np.clip(y8,  0, 255).astype(np.uint8),
+                np.clip(cb8, 0, 255).astype(np.uint8),
+                np.clip(cr8, 0, 255).astype(np.uint8))
+
+    # ------------------------------------------------------------
+    def ycbcr_to_rgb(self, ycbcr_8bit):
+        """
+        BT.601 full-range YCbCr→RGB conversion.
+        *ycbcr_8bit* must already be uint8 / 0-255.
+        """
+        y  = ycbcr_8bit[..., 0].astype(np.float32)
+        cb = ycbcr_8bit[..., 1].astype(np.float32) - 128.0
+        cr = ycbcr_8bit[..., 2].astype(np.float32) - 128.0
+
+        r = y + 1.40200 * cr
+        g = y - 0.34414 * cb - 0.71414 * cr
+        b = y + 1.77200 * cb
+
+        return np.clip(np.stack((r, g, b), axis=2), 0, 255).astype(np.uint8)
 
 # Example usage
 if __name__ == "__main__":
