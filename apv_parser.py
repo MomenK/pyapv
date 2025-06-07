@@ -1,6 +1,7 @@
 import struct
 import numpy as np
 import argparse
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from PIL import Image
 
@@ -272,7 +273,8 @@ class APVDecoder:
         with open(filepath, "rb") as f:
             self.data = f.read()
         self.reader = BitstreamReader(self.data)
-        self.frames = []
+        self.make_cb_cr_cmaps()
+
 
     def setup_frame_buffers(self, width, height, num_comps, SubWidthC, SubHeightC):
         self.rec_samples = []
@@ -299,33 +301,22 @@ class APVDecoder:
 
     def parse_access_units(self):
         r = self.reader
-        index = 0
+        au_index = 0
         while r.more_data():
             try:
                 au_size = int.from_bytes(r.read_bytes(4), 'big')
-                au_payload = r.read_bytes(au_size)
-                sub_reader = BitstreamReader(au_payload)
+                au_data = r.read_bytes(au_size)
+                au_reader = BitstreamReader(au_data)
 
-                signature = sub_reader.read_bytes(4).decode('ascii', errors='replace')
-                print(f"\nAccess Unit {index}:")
+                signature = au_reader.read_bytes(4).decode('ascii', errors='replace')
+                print(f"\nAccess Unit {au_index}:")
                 print(f"  Signature: {signature}")
                 print(f"  Total size: {au_size} bytes")
 
-                curr_read_size = 4
                 pbu_index = 0
-
-                while curr_read_size < au_size:
-                    if sub_reader.remaining_bytes() < 4:
-                        raise EOFError("Unexpected end of AU while reading pbu_size")
-
-                    pbu_size = int.from_bytes(sub_reader.read_bytes(4), 'big')
-                    curr_read_size += 4
-
-                    if sub_reader.remaining_bytes() < pbu_size:
-                        raise EOFError("Unexpected end of AU while reading PBU")
-
-                    pbu_data = sub_reader.read_bytes(pbu_size)
-                    curr_read_size += pbu_size
+                while au_reader.remaining_bytes():
+                    pbu_size = int.from_bytes(au_reader.read_bytes(4), 'big')
+                    pbu_data = au_reader.read_bytes(pbu_size)
 
                     pbu_reader = BitstreamReader(pbu_data)
                     pbu_type = int.from_bytes(pbu_reader.read_bytes(1), 'big')
@@ -337,10 +328,6 @@ class APVDecoder:
                     print(f"      Type     : {pbu_type} (0x{pbu_type:02X})")
                     print(f"      Group ID : {group_id}")
                     print(f"      Reserved : {reserved} (should be 0)")
-
-                    payload_after_header = pbu_data[4:]
-                    preview = payload_after_header[:16].hex(' ', 1)
-                    print(f"      Payload Preview (first 16 bytes after header): {preview}...")
 
                     if 1 <= pbu_type <= 2 or 25 <= pbu_type <= 27:
                         print(f"      -> Contains frame() data")
@@ -356,78 +343,11 @@ class APVDecoder:
 
                     pbu_index += 1
 
-                self.frames.append(au_payload)
-                index += 1
+                au_index += 1
 
             except Exception as e:
-                print(f"Error parsing AU {index}: {e}")
+                print(f"Error parsing AU {au_index}: {e}")
                 break
-
-    def parse_tile(self, reader: BitstreamReader, tile_idx: int):
-
-        num_comps, SubWidthC, SubHeightC = self.parse_chroma_format_idc(self.chroma_format_idc)
-
-        tile_header_size = int.from_bytes(reader.read_bytes(2), 'big')
-        tile_index = int.from_bytes(reader.read_bytes(2), 'big')
-        tile_data_sizes = [int.from_bytes(reader.read_bytes(4), 'big') for _ in range(num_comps)]
-        tile_qps = [int.from_bytes(reader.read_bytes(1), 'big') for _ in range(num_comps)]
-        reserved = int.from_bytes(reader.read_bytes(1), 'big')
-        reader.byte_align()
-
-        print(f"              tile_header_size: {tile_header_size}")
-        print(f"              tile_index: {tile_index}")
-        print(f"              tile_data_sizes: {tile_data_sizes}")
-        print(f"              tile_qp: {tile_qps}")
-        print(f"              reserved_zero_8bits: {reserved}")
-
-        MbWidth = 16
-        MbHeight = 16
-
-        x0 = self.ColStarts[tile_idx % self.TileCols]
-        y0 = self.RowStarts[tile_idx // self.TileCols]
-        numMbColsInTile  = (self.ColStarts[(tile_idx % self.TileCols)+1] - x0) // MbWidth
-        numMbRowsInTile  = (self.RowStarts[(tile_idx // self.TileCols)+1] - y0) // MbHeight
-        max_mbs_in_tile  = numMbColsInTile * numMbRowsInTile
-
-
-        for cIdx in range(num_comps):
-            # Parallelism breaks at tile component
-            # Need a TileComp Class: has a bitstream/entropy decoder and compute functions.
-            mb_data = BitstreamReader(reader.read_bytes(tile_data_sizes[cIdx]))
-            print (f"             tile_data for component {cIdx}: {mb_data.remaining_bytes()} Bytes")
-
-            configs = {
-                "SubWidthC"         : SubWidthC,
-                "SubHeightC"        : SubHeightC,
-                "numMbColsInTile"   : numMbColsInTile,
-                "numMbsInTile"      : max_mbs_in_tile,
-                "QP"                : tile_qps[cIdx],
-                "bit_depth_minus8"  : self.bit_depth_minus8,
-                "QMatrix"           : self.q_matrix[cIdx]
-            }
-            tile_comp = TileComp(cIdx,mb_data, configs)
-            tile_comp.decode()
-            
-            subW = 1 if cIdx == 0 else SubWidthC
-            subH = 1 if cIdx == 0 else SubHeightC
-            if hasattr(self, 'rec_samples') and self.rec_samples[cIdx] is not None:
-                for i in range(numMbRowsInTile * 16):
-                    for j in range(numMbColsInTile * 16):
-                        yy = y0 // subH + i
-                        xx = x0 // subW  + j
-
-                        if 0 <= yy < self.rec_samples[cIdx].shape[0] and 0 <= xx < self.rec_samples[cIdx].shape[1]:
-                            # print(f"                    Writing into frame buffer component {cIdx} value {self.clip(0, 255, rec_block[i, j])}")
-                            self.rec_samples[cIdx][yy, xx] = tile_comp.dump_data()[i,j]
-
-            reader.byte_align()
-
-        dummy_count = 0
-        while reader.more_data():
-            _ = reader.read_bytes(1)
-            dummy_count += 1
-        if dummy_count > 0:
-            print(f"              tile_dummy_byte: {dummy_count} trailing bytes skipped")
 
     def parse_frame(self, reader: BitstreamReader):
         print("        Parsing frame_header()")
@@ -552,6 +472,72 @@ class APVDecoder:
         
         self.save_frame_as_image("frame_output.png",SubWidthC, SubHeightC)
 
+    def parse_tile(self, reader: BitstreamReader, tile_idx: int):
+
+        num_comps, SubWidthC, SubHeightC = self.parse_chroma_format_idc(self.chroma_format_idc)
+
+        tile_header_size = int.from_bytes(reader.read_bytes(2), 'big')
+        tile_index = int.from_bytes(reader.read_bytes(2), 'big')
+        tile_data_sizes = [int.from_bytes(reader.read_bytes(4), 'big') for _ in range(num_comps)]
+        tile_qps = [int.from_bytes(reader.read_bytes(1), 'big') for _ in range(num_comps)]
+        reserved = int.from_bytes(reader.read_bytes(1), 'big')
+        reader.byte_align()
+
+        print(f"              tile_header_size: {tile_header_size}")
+        print(f"              tile_index: {tile_index}")
+        print(f"              tile_data_sizes: {tile_data_sizes}")
+        print(f"              tile_qp: {tile_qps}")
+        print(f"              reserved_zero_8bits: {reserved}")
+
+        MbWidth = 16
+        MbHeight = 16
+
+        x0 = self.ColStarts[tile_idx % self.TileCols]
+        y0 = self.RowStarts[tile_idx // self.TileCols]
+        numMbColsInTile  = (self.ColStarts[(tile_idx % self.TileCols)+1] - x0) // MbWidth
+        numMbRowsInTile  = (self.RowStarts[(tile_idx // self.TileCols)+1] - y0) // MbHeight
+        max_mbs_in_tile  = numMbColsInTile * numMbRowsInTile
+
+
+        for cIdx in range(num_comps):
+            # Parallelism breaks at tile component
+            # Need a TileComp Class: has a bitstream/entropy decoder and compute functions.
+            mb_data = BitstreamReader(reader.read_bytes(tile_data_sizes[cIdx]))
+            print (f"             tile_data for component {cIdx}: {mb_data.remaining_bytes()} Bytes")
+
+            configs = {
+                "SubWidthC"         : SubWidthC,
+                "SubHeightC"        : SubHeightC,
+                "numMbColsInTile"   : numMbColsInTile,
+                "numMbsInTile"      : max_mbs_in_tile,
+                "QP"                : tile_qps[cIdx],
+                "bit_depth_minus8"  : self.bit_depth_minus8,
+                "QMatrix"           : self.q_matrix[cIdx]
+            }
+            tile_comp = TileComp(cIdx,mb_data, configs)
+            tile_comp.decode()
+            
+            subW = 1 if cIdx == 0 else SubWidthC
+            subH = 1 if cIdx == 0 else SubHeightC
+            if hasattr(self, 'rec_samples') and self.rec_samples[cIdx] is not None:
+                for i in range(numMbRowsInTile * 16):
+                    for j in range(numMbColsInTile * 16):
+                        yy = y0 // subH + i
+                        xx = x0 // subW  + j
+
+                        if 0 <= yy < self.rec_samples[cIdx].shape[0] and 0 <= xx < self.rec_samples[cIdx].shape[1]:
+                            # print(f"                    Writing into frame buffer component {cIdx} value {self.clip(0, 255, rec_block[i, j])}")
+                            self.rec_samples[cIdx][yy, xx] = tile_comp.dump_data()[i,j]
+
+            reader.byte_align()
+
+        dummy_count = 0
+        while reader.more_data():
+            _ = reader.read_bytes(1)
+            dummy_count += 1
+        if dummy_count > 0:
+            print(f"              tile_dummy_byte: {dummy_count} trailing bytes skipped")
+
     # ------------------------------------------------------------
     #  Display helpers
     # ------------------------------------------------------------
@@ -585,22 +571,24 @@ class APVDecoder:
         )
 
         # --- 3)  YCbCr → RGB  (BT.601 full-swing) ---------------
-        rgb = self.ycbcr_to_rgb(np.stack((y8, cb8, cr8), axis=2))
-        print(f"{rgb.shape}")
-        plt.imshow(rgb)
-        # plt.title("Reconstructed Luma (Y)")
-        plt.axis("off")
-        plt.show()
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4))   # 1 row × 3 cols
+        print("&&&&&&&&&&&&&&&&&&&")
+        print(y.shape[0], y.shape[1])
+        rgb = self.ycbcr_to_rgb(y8, cb8, cr8).reshape(y.shape[0],y.shape[1],3) 
+        print(rgb.shape)
+
+        # --- 4)  plot and save ---------------
+        fig, axes = plt.subplots(2, 2, figsize=(12, 4))   # 1 row × 3 cols
+        mid_val = (1 << (self.BitDepth - 1))
 
         planes = [
-            (y,  "Reconstructed Luma (Y)"),
-            (cb, "Reconstructed Chroma (Cb)"),
-            (cr, "Reconstructed Chroma (Cr)"),
+            (rgb / 256, "Reconstructed RGB", None),
+            (y8  / 256, "Reconstructed Luma (Y)", 'gray'),
+            (cb8 / 256, "Reconstructed Chroma (Cb)", 'Cb'),
+            (cr8 / 256, "Reconstructed Chroma (Cr)", 'Cr'),
         ]
 
-        for ax, (img, title) in zip(axes, planes):
-            ax.imshow(img, cmap='gray')
+        for ax, (img, title, color) in zip(axes.flat, planes):
+            ax.imshow(img, cmap=color,vmin=0,vmax=1)
             ax.set_title(title)
             ax.axis('off')
 
@@ -664,22 +652,42 @@ class APVDecoder:
         return (np.clip(y8,  0, 255).astype(np.uint8),
                 np.clip(cb8, 0, 255).astype(np.uint8),
                 np.clip(cr8, 0, 255).astype(np.uint8))
-
     # ------------------------------------------------------------
-    def ycbcr_to_rgb(self, ycbcr_8bit):
+    def ycbcr_to_rgb(self, y, cb, cr):
         """
         BT.601 full-range YCbCr→RGB conversion.
         *ycbcr_8bit* must already be uint8 / 0-255.
         """
-        y  = ycbcr_8bit[..., 0].astype(np.float32)
-        cb = ycbcr_8bit[..., 1].astype(np.float32) - 128.0
-        cr = ycbcr_8bit[..., 2].astype(np.float32) - 128.0
+        y  = y.astype(np.float32)
+        cb = cb.astype(np.float32) - 128.0
+        cr = cr.astype(np.float32) - 128.0
 
-        r = y + 1.40200 * cr
-        g = y - 0.34414 * cb - 0.71414 * cr
-        b = y + 1.77200 * cb
+        r = np.clip(y + 1.40200 * cr, 0, 255).astype(np.uint8)
+        g = np.clip(y - 0.34414 * cb - 0.71414 * cr, 0, 255).astype(np.uint8)
+        b = np.clip(y + 1.77200 * cb, 0, 255).astype(np.uint8)
 
-        return np.clip(np.stack((r, g, b), axis=2), 0, 255).astype(np.uint8)
+        return np.stack((r,g,b),axis=-1)
+
+    def make_cb_cr_cmaps(self,N=256):
+        full_scale = 255
+        mid_val = 128
+        N = 256
+        y   = np.zeros(N) + mid_val
+        
+        cb = np.linspace(-mid_val, mid_val, N) + mid_val
+        cr = np.zeros(N) + mid_val
+        rgb = self.ycbcr_to_rgb(y,cb,cr) / full_scale
+        Cb_cmap = mpl.colors.ListedColormap(rgb, name="Cb")
+        
+
+        cb  = np.zeros(N) + mid_val
+        cr  = np.linspace(-mid_val, mid_val, N) + mid_val
+        rgb = self.ycbcr_to_rgb(y,cb,cr) / full_scale
+        Cr_cmap = mpl.colors.ListedColormap(rgb, name="Cr")
+
+        mpl.colormaps.register(Cb_cmap)
+        mpl.colormaps.register(Cr_cmap)
+
 
 # Example usage
 if __name__ == "__main__":
@@ -688,4 +696,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     decoder = APVDecoder(args.filepath)
+    # decoder.make_cb_cr_cmaps()
     decoder.parse_access_units()
