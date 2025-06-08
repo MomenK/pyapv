@@ -274,6 +274,7 @@ class APVDecoder:
             self.data = f.read()
         self.reader = BitstreamReader(self.data)
         self.make_cb_cr_cmaps()
+        self.frame_index = 0
 
 
     def setup_frame_buffers(self, width, height, num_comps, SubWidthC, SubHeightC):
@@ -351,7 +352,7 @@ class APVDecoder:
 
     def parse_frame(self, reader: BitstreamReader):
         print("        Parsing frame_header()")
-
+        self.frame_index += 1
         profile_idc = int.from_bytes(reader.read_bytes(1), 'big')
         level_idc = int.from_bytes(reader.read_bytes(1), 'big')
 
@@ -470,7 +471,7 @@ class APVDecoder:
             print(f"              tile_size: {tile_size}")
             self.parse_tile(subreader, i)
         
-        self.save_frame_as_image("frame_output.png",SubWidthC, SubHeightC)
+        self.save_frame_as_image("reconstructed_frame_"+str(self.frame_index),SubWidthC, SubHeightC)
 
     def parse_tile(self, reader: BitstreamReader, tile_idx: int):
 
@@ -571,7 +572,6 @@ class APVDecoder:
         )
 
         # --- 3)  YCbCr → RGB  (BT.601 full-swing) ---------------
-        print("&&&&&&&&&&&&&&&&&&&")
         print(y.shape[0], y.shape[1])
         rgb = self.ycbcr_to_rgb(y8, cb8, cr8).reshape(y.shape[0],y.shape[1],3) 
         print(rgb.shape)
@@ -593,12 +593,12 @@ class APVDecoder:
             ax.axis('off')
 
         plt.tight_layout()
-        plt.show()
+        plt.savefig(filename+"_decomposition.png")
 
-        Image.fromarray(rgb, 'RGB').save(filename)
+        Image.fromarray(rgb, 'RGB').save(filename+".png")
         print(f"saved reconstructed frame → {filename}")
 
-        yuv_name = "test.yuv"
+        yuv_name = filename+".yuv"
         out_dtype = np.dtype('<u2')
         with open(yuv_name, "wb") as fp:
             # # Y plane (original resolution, original bit-depth → little-endian)
