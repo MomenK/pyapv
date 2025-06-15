@@ -122,12 +122,10 @@ class TileComp:
                     rec_block = self.inverse_transform(scaled_block)
                     #- Reconstruction scaling
                     bdShift = (20 - self.BitDepth)
-                    for ix in range(self.TrSize):
-                        for jy in range(self.TrSize):
-                            val =  (rec_block[ix,jy] + (1 << (bdShift - 1))) >> bdShift
-                            mid_val = (1 << (self.BitDepth - 1))
-                            max_val = (1 << self.BitDepth) - 1
-                            rec_block[ix,jy] = self.clip(0, max_val, val + mid_val)
+                    bdOffset  = (1 << (bdShift - 1))
+                    mid_val = (1 << (self.BitDepth - 1))
+                    max_val = (1 << self.BitDepth) - 1
+                    rec_block = np.clip(0, max_val, ((rec_block + bdOffset) >> bdShift) + mid_val)
 
                     #Store data in local memory
                     yy0 = yMb // self.subH + y
@@ -142,19 +140,15 @@ class TileComp:
         return max(min_val, min(max_val, val))
 
     def scale_transform_coefficients(self, coeff_block):
-        levelScale = [40, 45, 51, 57, 64, 71]
-        qP = self.qp
         bdShift = self.BitDepth  - 2 #+ ((3 + 3) // 2) - 5
-
-        d = np.zeros((8, 8), dtype=np.int32)
-        for y in range(8):
-            for x in range(8):
-                val = (coeff_block[y][x] * self.QMatrix[y][x] * levelScale[qP % 6]) << (qP // 6)
-                val = (val + (1 << (bdShift - 1))) >> bdShift
-                d[y][x] = self.clip(-32768, 32767, val) #int16
-                # d[x][y] = self.clip(-32768, 32767,((coeff_block[x][y] * QMatrix[x][y] * levelScale[qP % 6] << (qP//6)) + (1 << (bdShift-1)) >> bdShift))
-
-        return d
+        levelScale = [40, 45, 51, 57, 64, 71]
+        scale  = levelScale[self.qp % 6]
+        shift  = self.qp // 6
+        bdOffset = (1 << (bdShift - 1))
+ 
+        val = (coeff_block * self.QMatrix * scale) << shift
+        d   = (val + bdOffset) >> bdShift
+        return np.clip(-32768, 32767, d).astype(np.int32) 
 
     def inverse_transform(self, block):
         transMatrix = np.array([
