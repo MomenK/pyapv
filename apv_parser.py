@@ -231,14 +231,13 @@ class APVDecoder:
         if self.dump_pkl:
         # **** use pickle for testing..
             save_job_queue(self.job_queue, "jobs"+str(self.frame_index)+".pkl")
-            job_queue = load_job_queue("jobs"+str(self.frame_index)+".pkl")
-            self.decode_tiles(job_queue)
+            # job_queue = load_job_queue("jobs"+str(self.frame_index)+".pkl")
+            # self.decode_tiles(job_queue)
         else:
         # **** normal operation
             self.decode_tiles(self.job_queue)
-
-        frame_viewer = FrameViewer("reconstructed_frame_"+str(self.frame_index),SubWidthC, SubHeightC, self.BitDepth, self.frame_buffer)
-        frame_viewer.save_frame_as_image()
+            frame_viewer = FrameViewer("reconstructed_frame_"+str(self.frame_index),SubWidthC, SubHeightC, self.BitDepth, self.frame_buffer)
+            frame_viewer.save_frame_as_image()
 
 
     def parse_tiles(self, top_reader: BitstreamReader, NumTiles: int):
@@ -324,7 +323,7 @@ class APVDecoder:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="APV Bitstream Parser")
     parser.add_argument("filepath", help="Path to the .apv bitstream file")
-    parser.add_argument('-d', '--dump_pkl', action='store_true')
+    parser.add_argument('-p', '--dump_pkl', action='store_true')
 
     args = parser.parse_args()
 
