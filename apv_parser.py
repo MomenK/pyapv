@@ -28,12 +28,13 @@ def load_job_queue(file_path):
     return job_queue
 
 class APVDecoder:
-    def __init__(self, filepath):
+    def __init__(self, filepath,dump_pkl):
         with open(filepath, "rb") as f:
             self.data = f.read()
         self.reader = BitstreamReader(self.data)
         self.frame_index = 0
         self.job_queue: dict[int,tuple] = {} #tileCompIdx -> (int, np.array)
+        self.dump_pkl = dump_pkl
 
     def setup_frame_buffer(self, width, height, num_comps, SubWidthC, SubHeightC):
         self.frame_buffer = []
@@ -227,12 +228,14 @@ class APVDecoder:
 
         self.parse_tiles(reader, NumTiles)
 
+        if self.dump_pkl:
         # **** use pickle for testing..
-        save_job_queue(self.job_queue, "jobs"+str(self.frame_index)+".pkl")
-        job_queue = load_job_queue("jobs"+str(self.frame_index)+".pkl")
-        self.decode_tiles(job_queue)
+            save_job_queue(self.job_queue, "jobs"+str(self.frame_index)+".pkl")
+            job_queue = load_job_queue("jobs"+str(self.frame_index)+".pkl")
+            self.decode_tiles(job_queue)
+        else:
         # **** normal operation
-        # self.decode_tiles(self.job_queue)
+            self.decode_tiles(self.job_queue)
 
         frame_viewer = FrameViewer("reconstructed_frame_"+str(self.frame_index),SubWidthC, SubHeightC, self.BitDepth, self.frame_buffer)
         frame_viewer.save_frame_as_image()
@@ -321,7 +324,9 @@ class APVDecoder:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="APV Bitstream Parser")
     parser.add_argument("filepath", help="Path to the .apv bitstream file")
+    parser.add_argument('-d', '--dump_pkl', action='store_true')
+
     args = parser.parse_args()
 
-    decoder = APVDecoder(args.filepath)
+    decoder = APVDecoder(args.filepath,args.dump_pkl)
     decoder.parse_bitstream() #TODO: Pass a decode flag/ either dump tile bitstreams and json log or decode image.
