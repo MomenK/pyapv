@@ -206,9 +206,9 @@ class APVDecoder:
             print(f"            Parsing tile_header() for tile {i}:")
             tile_size = int.from_bytes(reader.read_bytes(4), 'big')
             tile_data = reader.read_bytes(tile_size)
-            subreader = BitstreamReader(tile_data)
+            tile_reader = BitstreamReader(tile_data)
             print(f"              tile_size: {tile_size}")
-            self.parse_tile(subreader, i)
+            self.parse_tile(tile_reader, i)
         
         frame_viewer = FrameViewer("reconstructed_frame_"+str(self.frame_index),SubWidthC, SubHeightC, self.BitDepth, self.frame_buffer)
         frame_viewer.save_frame_as_image()
@@ -234,51 +234,50 @@ class APVDecoder:
         MbWidth = 16
         MbHeight = 16
 
-        x0 = self.ColStarts[tile_idx % self.TileCols]
-        y0 = self.RowStarts[tile_idx // self.TileCols]
-        numMbColsInTile  = (self.ColStarts[(tile_idx % self.TileCols)+1] - x0) // MbWidth
-        numMbRowsInTile  = (self.RowStarts[(tile_idx // self.TileCols)+1] - y0) // MbHeight
-        max_mbs_in_tile  = numMbColsInTile * numMbRowsInTile
+        xIdx = self.ColStarts[tile_idx %  self.TileCols]
+        yIdx = self.RowStarts[tile_idx // self.TileCols]
+        numMbColsInTile  = (self.ColStarts[(tile_idx %  self.TileCols)+1] - xIdx) // MbWidth
+        numMbRowsInTile  = (self.RowStarts[(tile_idx // self.TileCols)+1] - yIdx) // MbHeight
 
 
         for cIdx in range(num_comps):
-            # Parallelism breaks at tile component
-            # Need a TileComp Class: has a bitstream/entropy decoder and compute functions.
-            mb_data = BitstreamReader(reader.read_bytes(tile_data_sizes[cIdx]))
-            print (f"             tile_data for component {cIdx}: {mb_data.remaining_bytes()} Bytes")
-
-            configs = {
-                "SubWidthC"         : SubWidthC,
-                "SubHeightC"        : SubHeightC,
-                "numMbColsInTile"   : numMbColsInTile,
-                "numMbsInTile"      : max_mbs_in_tile,
-                "QP"                : tile_qps[cIdx],
-                "bit_depth_minus8"  : self.bit_depth_minus8,
-                "QMatrix"           : self.q_matrix[cIdx]
-            }
-            tile_comp = TileComp(cIdx,mb_data, configs)
-            tile_comp.decode()
-            
             subW = 1 if cIdx == 0 else SubWidthC
             subH = 1 if cIdx == 0 else SubHeightC
+
+            # Parallelism breaks at tile component
+            configs = {
+                # required for figuring out where to write data in frame buffer
+                "cIdx"              : cIdx,
+                "xIdx"              : xIdx,
+                "yIdx"              : yIdx,
+                # "tileByteSize"      : tile_data_sizes[cIdx],
+                # required for decoder
+                "subW"              : subW,
+                "subH"              : subH,
+                "numMbColsInTile"   : numMbColsInTile,
+                "numMbRowsInTile"   : numMbRowsInTile,
+                "bit_depth_minus8"  : self.bit_depth_minus8,
+                "QP"                : tile_qps[cIdx],
+                "QMatrix"           : self.q_matrix[cIdx]
+            }     
+            tile_data = BitstreamReader(reader.read_bytes(tile_data_sizes[cIdx]))
+            reader.byte_align()
+            print (f"             tile_data for component {cIdx}: {tile_data.remaining_bytes()} Bytes")
+
+            # Decode tile data
+            tile_comp = TileComp(cIdx,tile_data, configs)
+            tile_comp.decode()
+
+            # Write reconstructed data into the frame buffer
             if hasattr(self, 'frame_buffer') and self.frame_buffer[cIdx] is not None:
-                for i in range(numMbRowsInTile * 16):
-                    for j in range(numMbColsInTile * 16):
-                        yy = y0 // subH + i
-                        xx = x0 // subW  + j
+                for i in range(numMbRowsInTile * 16): #tile height
+                    for j in range(numMbColsInTile * 16): #tile width
+                        yy = yIdx // subH + i
+                        xx = xIdx // subW + j
 
                         if 0 <= yy < self.frame_buffer[cIdx].shape[0] and 0 <= xx < self.frame_buffer[cIdx].shape[1]:
                             # print(f"                    Writing into frame buffer component {cIdx} value {self.clip(0, 255, rec_block[i, j])}")
                             self.frame_buffer[cIdx][yy, xx] = tile_comp.dump_data()[i,j]
-
-            reader.byte_align()
-
-        dummy_count = 0
-        while reader.more_data():
-            _ = reader.read_bytes(1)
-            dummy_count += 1
-        if dummy_count > 0:
-            print(f"              tile_dummy_byte: {dummy_count} trailing bytes skipped")
 
 
 # Example usage

@@ -5,17 +5,14 @@ class TileComp:
     def __init__(self, cIdx, reader : BitstreamReader, configs):
         self.reader = reader
         self.configs = configs
-
-        self.x0 = 0 #Time coordinates
-        self.y0 = 0 #Not coordinates
     
         self.MbWidth = 16
         self.MbHeight = 16
         self.TrSize = 8
-        self.subW = 1 if cIdx == 0 else configs["SubWidthC"]
-        self.subH = 1 if cIdx == 0 else configs["SubHeightC"]
-        self.blkWidth    = self.MbWidth  if cIdx == 0 else self.MbWidth  // configs["SubWidthC"]
-        self.blkHeight   = self.MbHeight if cIdx == 0 else self.MbHeight // configs["SubHeightC"]
+        self.subW = configs["subW"]
+        self.subH = configs["subH"]
+        self.blkWidth    = self.MbWidth  // self.subW
+        self.blkHeight   = self.MbHeight // self.subH
         self.qp = configs["QP"]
         self.BitDepth = configs["bit_depth_minus8"] + 8
         self.QpBdOffset = configs["bit_depth_minus8"] * 6
@@ -26,21 +23,19 @@ class TileComp:
         self.PrevDCDiff = 20
         self.Prev1stAcLevel = 0
 
-        # tile_height =  (self.configs["numMbsInTile"] // self.configs["numMbColsInTile"]) * self.blkHeight
-        # tile_width  =  self.configs["numMbColsInTile"] * self.blkWidth
-        tile_height =  (self.configs["numMbsInTile"] // self.configs["numMbColsInTile"]) * self.MbHeight
+        tile_height =  self.configs["numMbRowsInTile"] * self.MbHeight
         tile_width  =  self.configs["numMbColsInTile"] * self.MbWidth 
-
         print(f"Creating tile recon buffer of size {tile_height} X {tile_width} for component {cIdx}")
         self.tile_recon_buffer = np.zeros((tile_height,tile_width), dtype=np.uint16)
 
 
     def decode(self):
         # macroblock_layer iteration.
-        for i in range(self.configs["numMbsInTile"]):
-            xMb = self.x0 + ((i % self.configs["numMbColsInTile"]) * self.MbWidth)
-            yMb = self.y0 + ((i // self.configs["numMbColsInTile"]) * self.MbHeight)
-            # print(f"                macroblock_layer at xMb={xMb}, yMb={yMb} {i}/{self.configs['numMbsInTile']} - MB={self.blkHeight} x {self.blkWidth} ")
+        numMbsInTile = self.configs["numMbRowsInTile"] * self.configs["numMbColsInTile"]
+        for i in range(numMbsInTile):
+            xMb =  ((i % self.configs["numMbColsInTile"]) * self.MbWidth)
+            yMb =  ((i // self.configs["numMbColsInTile"]) * self.MbHeight)
+            # print(f"                macroblock_layer at xMb={xMb}, yMb={yMb} {i}/{numMbsInTile} - MB={self.blkHeight} x {self.blkWidth} ")
 
 
             self.TransCoeff = np.zeros((self.TrSize, self.TrSize), dtype=np.int32)
