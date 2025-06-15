@@ -2,8 +2,9 @@ import numpy as np
 from bitstream_reader import BitstreamReader
 
 class TileComp:
-    def __init__(self, cIdx, reader : BitstreamReader, configs):
-        self.reader = reader
+    def __init__(self, configs, tile_data):
+        
+        self.reader = BitstreamReader(tile_data)
         self.configs = configs
     
         self.MbWidth = 16
@@ -25,7 +26,7 @@ class TileComp:
 
         tile_height =  self.configs["numMbRowsInTile"] * self.MbHeight
         tile_width  =  self.configs["numMbColsInTile"] * self.MbWidth 
-        print(f"Creating tile recon buffer of size {tile_height} X {tile_width} for component {cIdx}")
+        # print(f"Creating tile recon buffer of size {tile_height} X {tile_width} for component {configs['cIdx']}")
         self.tile_recon_buffer = np.zeros((tile_height,tile_width), dtype=np.uint16)
 
 

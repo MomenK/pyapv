@@ -10,7 +10,7 @@ class APVDecoder:
             self.data = f.read()
         self.reader = BitstreamReader(self.data)
         self.frame_index = 0
-
+        self.tile_queue: dict[int,tuple] = {} #tileCompIdx -> (int, np.array)
 
     def setup_frame_buffer(self, width, height, num_comps, SubWidthC, SubHeightC):
         self.frame_buffer = []
@@ -202,82 +202,100 @@ class APVDecoder:
         reader.byte_align()
         print("          byte_alignment(): aligned to next byte boundary")
 
-        for i in range(NumTiles):
-            print(f"            Parsing tile_header() for tile {i}:")
-            tile_size = int.from_bytes(reader.read_bytes(4), 'big')
-            tile_data = reader.read_bytes(tile_size)
-            tile_reader = BitstreamReader(tile_data)
-            print(f"              tile_size: {tile_size}")
-            self.parse_tile(tile_reader, i)
+        # for i in range(NumTiles):
+        #     print(f"            Parsing tile_header() for tile {i}:")
+        #     tile_size = int.from_bytes(reader.read_bytes(4), 'big')
+        #     tile_data = reader.read_bytes(tile_size)
+        #     tile_reader = BitstreamReader(tile_data)
+        #     print(f"              tile_size: {tile_size}")
+        self.parse_tiles(reader, NumTiles)
         
         frame_viewer = FrameViewer("reconstructed_frame_"+str(self.frame_index),SubWidthC, SubHeightC, self.BitDepth, self.frame_buffer)
         frame_viewer.save_frame_as_image()
 
 
-    def parse_tile(self, reader: BitstreamReader, tile_idx: int):
-
+    def parse_tiles(self, top_reader: BitstreamReader, NumTiles: int):
         num_comps, SubWidthC, SubHeightC = self.parse_chroma_format_idc(self.chroma_format_idc)
-
-        tile_header_size = int.from_bytes(reader.read_bytes(2), 'big')
-        tile_index = int.from_bytes(reader.read_bytes(2), 'big')
-        tile_data_sizes = [int.from_bytes(reader.read_bytes(4), 'big') for _ in range(num_comps)]
-        tile_qps = [int.from_bytes(reader.read_bytes(1), 'big') for _ in range(num_comps)]
-        reserved = int.from_bytes(reader.read_bytes(1), 'big')
-        reader.byte_align()
-
-        print(f"              tile_header_size: {tile_header_size}")
-        print(f"              tile_index: {tile_index}")
-        print(f"              tile_data_sizes: {tile_data_sizes}")
-        print(f"              tile_qp: {tile_qps}")
-        print(f"              reserved_zero_8bits: {reserved}")
-
-        MbWidth = 16
-        MbHeight = 16
-
-        xIdx = self.ColStarts[tile_idx %  self.TileCols]
-        yIdx = self.RowStarts[tile_idx // self.TileCols]
-        numMbColsInTile  = (self.ColStarts[(tile_idx %  self.TileCols)+1] - xIdx) // MbWidth
-        numMbRowsInTile  = (self.RowStarts[(tile_idx // self.TileCols)+1] - yIdx) // MbHeight
-
-
-        for cIdx in range(num_comps):
-            subW = 1 if cIdx == 0 else SubWidthC
-            subH = 1 if cIdx == 0 else SubHeightC
-
-            # Parallelism breaks at tile component
-            configs = {
-                # required for figuring out where to write data in frame buffer
-                "cIdx"              : cIdx,
-                "xIdx"              : xIdx,
-                "yIdx"              : yIdx,
-                # "tileByteSize"      : tile_data_sizes[cIdx],
-                # required for decoder
-                "subW"              : subW,
-                "subH"              : subH,
-                "numMbColsInTile"   : numMbColsInTile,
-                "numMbRowsInTile"   : numMbRowsInTile,
-                "bit_depth_minus8"  : self.bit_depth_minus8,
-                "QP"                : tile_qps[cIdx],
-                "QMatrix"           : self.q_matrix[cIdx]
-            }     
-            tile_data = BitstreamReader(reader.read_bytes(tile_data_sizes[cIdx]))
+        MbWidth     = 16
+        MbHeight    = 16
+        
+        for tile_idx in range(NumTiles):
+            print(f"            Parsing tile_header() for tile {tile_idx}:")
+            tile_size = int.from_bytes(top_reader.read_bytes(4), 'big')
+            tile_data = top_reader.read_bytes(tile_size)
+            print(f"              tile_size: {tile_size}")
+        
+            reader = BitstreamReader(tile_data)
+            tile_header_size = int.from_bytes(reader.read_bytes(2), 'big')
+            tile_index = int.from_bytes(reader.read_bytes(2), 'big')
+            tile_data_sizes = [int.from_bytes(reader.read_bytes(4), 'big') for _ in range(num_comps)]
+            tile_qps = [int.from_bytes(reader.read_bytes(1), 'big') for _ in range(num_comps)]
+            reserved = int.from_bytes(reader.read_bytes(1), 'big')
             reader.byte_align()
-            print (f"             tile_data for component {cIdx}: {tile_data.remaining_bytes()} Bytes")
 
-            # Decode tile data
-            tile_comp = TileComp(cIdx,tile_data, configs)
-            tile_comp.decode()
+            print(f"              tile_header_size: {tile_header_size}")
+            print(f"              tile_index: {tile_index}")
+            print(f"              tile_data_sizes: {tile_data_sizes}")
+            print(f"              tile_qp: {tile_qps}")
+            print(f"              reserved_zero_8bits: {reserved}")
 
-            # Write reconstructed data into the frame buffer
-            if hasattr(self, 'frame_buffer') and self.frame_buffer[cIdx] is not None:
-                for i in range(numMbRowsInTile * 16): #tile height
-                    for j in range(numMbColsInTile * 16): #tile width
-                        yy = yIdx // subH + i
-                        xx = xIdx // subW + j
+            xIdx = self.ColStarts[tile_idx %  self.TileCols]
+            yIdx = self.RowStarts[tile_idx // self.TileCols]
+            numMbColsInTile  = (self.ColStarts[(tile_idx %  self.TileCols)+1] - xIdx) // MbWidth
+            numMbRowsInTile  = (self.RowStarts[(tile_idx // self.TileCols)+1] - yIdx) // MbHeight
 
-                        if 0 <= yy < self.frame_buffer[cIdx].shape[0] and 0 <= xx < self.frame_buffer[cIdx].shape[1]:
-                            # print(f"                    Writing into frame buffer component {cIdx} value {self.clip(0, 255, rec_block[i, j])}")
-                            self.frame_buffer[cIdx][yy, xx] = tile_comp.dump_data()[i,j]
+
+            for cIdx in range(num_comps):
+                subW = 1 if cIdx == 0 else SubWidthC
+                subH = 1 if cIdx == 0 else SubHeightC
+
+                # Parallelism breaks at tile component
+                cfg = {
+                    # required for figuring out where to write data in frame buffer
+                    "cIdx"              : cIdx,
+                    "xIdx"              : xIdx,
+                    "yIdx"              : yIdx,
+                    # required for decoder
+                    "subW"              : subW,
+                    "subH"              : subH,
+                    "numMbColsInTile"   : numMbColsInTile,
+                    "numMbRowsInTile"   : numMbRowsInTile,
+                    "bit_depth_minus8"  : self.bit_depth_minus8,
+                    "QP"                : tile_qps[cIdx],
+                    "QMatrix"           : self.q_matrix[cIdx]
+                }
+                tile_comp_data = np.frombuffer(reader.read_bytes(tile_data_sizes[cIdx]), dtype=np.uint8)
+                reader.byte_align()
+                print (f"             tile_data for component {cIdx}: {tile_comp_data.size} Bytes {tile_comp_data.dtype}")
+                self.tile_queue[tile_idx + (NumTiles * cIdx)] = (cfg, tile_comp_data)
+        self.decode_tiles(NumTiles,num_comps)
+
+
+    def decode_tiles(self,NumTiles,NumComps):
+        for tile_idx in range(NumTiles):
+            for cIdx in range(NumComps):
+                # Get tile data
+                cfg, tile_comp_data = self.tile_queue[tile_idx + (NumTiles * cIdx)]
+                cIdx = cfg["cIdx"]
+                yIdx = cfg["yIdx"]
+                xIdx = cfg["xIdx"]
+                subW = cfg["subW"]
+                subH = cfg["subH"]
+                numMbColsInTile = cfg["numMbColsInTile"]
+                numMbRowsInTile = cfg["numMbRowsInTile"]
+
+                # Decode tile data
+                tile_comp = TileComp(cfg, tile_comp_data)
+                tile_comp.decode()
+
+                # Write reconstructed data into the frame buffer
+                if hasattr(self, 'frame_buffer') and self.frame_buffer[cIdx] is not None:
+                    for i in range(numMbRowsInTile * 16): #tile height
+                        for j in range(numMbColsInTile * 16): #tile width
+                            yy = yIdx // subH + i
+                            xx = xIdx // subW + j
+                            if 0 <= yy < self.frame_buffer[cIdx].shape[0] and 0 <= xx < self.frame_buffer[cIdx].shape[1]:
+                                self.frame_buffer[cIdx][yy, xx] = tile_comp.dump_data()[i,j]
 
 
 # Example usage
