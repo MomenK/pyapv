@@ -4,6 +4,28 @@ from bitstream_reader import BitstreamReader
 from frame_viewer import FrameViewer 
 from tile_decoder import TileComp
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import pickle
+from pathlib import Path
+
+def save_job_queue(job_queue, file_path):
+    """
+    Serialize the whole job_queue to disk with pickle-protocol 5+.
+    """
+    file_path = Path(file_path)
+    with file_path.open("wb") as fp:
+        # protocol=5 ==> fastest, supports out-of-band buffers in 3.8+
+        pickle.dump(job_queue, fp, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"[saved] {len(job_queue)} jobs → {file_path.resolve()}")
+
+def load_job_queue(file_path):
+    """
+    Load a job_queue that was written by save_job_queue().
+    """
+    file_path = Path(file_path)
+    with file_path.open("rb") as fp:
+        job_queue = pickle.load(fp)
+    print(f"[loaded] {len(job_queue)} jobs  from {file_path.resolve()}")
+    return job_queue
 
 class APVDecoder:
     def __init__(self, filepath):
@@ -204,7 +226,14 @@ class APVDecoder:
         print("          byte_alignment(): aligned to next byte boundary")
 
         self.parse_tiles(reader, NumTiles)
-        self.decode_tiles()
+
+        # **** use pickle for testing..
+        save_job_queue(self.job_queue, "jobs"+str(self.frame_index)+".pkl")
+        job_queue = load_job_queue("jobs"+str(self.frame_index)+".pkl")
+        self.decode_tiles(job_queue)
+        # **** normal operation
+        # self.decode_tiles(self.job_queue)
+
         frame_viewer = FrameViewer("reconstructed_frame_"+str(self.frame_index),SubWidthC, SubHeightC, self.BitDepth, self.frame_buffer)
         frame_viewer.save_frame_as_image()
 
@@ -264,10 +293,10 @@ class APVDecoder:
                 print (f"             tile_data for component {cIdx}: {tile_comp_data.size} Bytes {tile_comp_data.dtype}")
                 self.job_queue[tile_idx + (NumTiles * cIdx)] = (cfg, tile_comp_data)
 
-    def decode_tiles(self):
+    def decode_tiles(self,job_queue):
         jobs = []
         with ProcessPoolExecutor() as pool:
-            for job_ in self.job_queue.values():
+            for job_ in job_queue.values():
                 cfg, tile_comp_data = job_
                 fut = pool.submit(self._decode_worker, cfg, tile_comp_data)
                 jobs.append(fut)
