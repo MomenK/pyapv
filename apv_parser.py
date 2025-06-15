@@ -3,6 +3,7 @@ import argparse
 from bitstream_reader import BitstreamReader
 from frame_viewer import FrameViewer 
 from tile_decoder import TileComp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 class APVDecoder:
     def __init__(self, filepath):
@@ -10,7 +11,7 @@ class APVDecoder:
             self.data = f.read()
         self.reader = BitstreamReader(self.data)
         self.frame_index = 0
-        self.tile_queue: dict[int,tuple] = {} #tileCompIdx -> (int, np.array)
+        self.job_queue: dict[int,tuple] = {} #tileCompIdx -> (int, np.array)
 
     def setup_frame_buffer(self, width, height, num_comps, SubWidthC, SubHeightC):
         self.frame_buffer = []
@@ -202,14 +203,8 @@ class APVDecoder:
         reader.byte_align()
         print("          byte_alignment(): aligned to next byte boundary")
 
-        # for i in range(NumTiles):
-        #     print(f"            Parsing tile_header() for tile {i}:")
-        #     tile_size = int.from_bytes(reader.read_bytes(4), 'big')
-        #     tile_data = reader.read_bytes(tile_size)
-        #     tile_reader = BitstreamReader(tile_data)
-        #     print(f"              tile_size: {tile_size}")
         self.parse_tiles(reader, NumTiles)
-        
+        self.decode_tiles()
         frame_viewer = FrameViewer("reconstructed_frame_"+str(self.frame_index),SubWidthC, SubHeightC, self.BitDepth, self.frame_buffer)
         frame_viewer.save_frame_as_image()
 
@@ -267,36 +262,31 @@ class APVDecoder:
                 tile_comp_data = np.frombuffer(reader.read_bytes(tile_data_sizes[cIdx]), dtype=np.uint8)
                 reader.byte_align()
                 print (f"             tile_data for component {cIdx}: {tile_comp_data.size} Bytes {tile_comp_data.dtype}")
-                self.tile_queue[tile_idx + (NumTiles * cIdx)] = (cfg, tile_comp_data)
-        self.decode_tiles(NumTiles,num_comps)
+                self.job_queue[tile_idx + (NumTiles * cIdx)] = (cfg, tile_comp_data)
 
+    def decode_tiles(self):
+        jobs = []
+        with ProcessPoolExecutor() as pool:
+            for job_ in self.job_queue.values():
+                cfg, tile_comp_data = job_
+                fut = pool.submit(self._decode_worker, cfg, tile_comp_data)
+                jobs.append(fut)
+    
+            for fut in as_completed(jobs):
+                cIdx, yIdx, xIdx, subW, subH, block = fut.result()
+                h, w = block.shape
+                yy0    = yIdx // subH
+                xx0    = xIdx // subW
+                self.frame_buffer[cIdx][yy0:yy0+h, xx0:xx0+w] = block
 
-    def decode_tiles(self,NumTiles,NumComps):
-        for tile_idx in range(NumTiles):
-            for cIdx in range(NumComps):
-                # Get tile data
-                cfg, tile_comp_data = self.tile_queue[tile_idx + (NumTiles * cIdx)]
-                cIdx = cfg["cIdx"]
-                yIdx = cfg["yIdx"]
-                xIdx = cfg["xIdx"]
-                subW = cfg["subW"]
-                subH = cfg["subH"]
-                numMbColsInTile = cfg["numMbColsInTile"]
-                numMbRowsInTile = cfg["numMbRowsInTile"]
-
-                # Decode tile data
-                tile_comp = TileComp(cfg, tile_comp_data)
-                tile_comp.decode()
-
-                # Write reconstructed data into the frame buffer
-                if hasattr(self, 'frame_buffer') and self.frame_buffer[cIdx] is not None:
-                    for i in range(numMbRowsInTile * 16): #tile height
-                        for j in range(numMbColsInTile * 16): #tile width
-                            yy = yIdx // subH + i
-                            xx = xIdx // subW + j
-                            if 0 <= yy < self.frame_buffer[cIdx].shape[0] and 0 <= xx < self.frame_buffer[cIdx].shape[1]:
-                                self.frame_buffer[cIdx][yy, xx] = tile_comp.dump_data()[i,j]
-
+    def _decode_worker(self, cfg, payload):
+        """
+        This is executed in a *separate* process.  
+        It creates a TileComp, decodes, and returns the numpy block and its component id.
+        """
+        tile_comp  = TileComp(cfg, payload)
+        tile_comp.decode()
+        return cfg["cIdx"], cfg["yIdx"], cfg["xIdx"], cfg["subW"], cfg["subH"], tile_comp.dump_data()
 
 # Example usage
 if __name__ == "__main__":

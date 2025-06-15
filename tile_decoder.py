@@ -24,8 +24,8 @@ class TileComp:
         self.PrevDCDiff = 20
         self.Prev1stAcLevel = 0
 
-        tile_height =  self.configs["numMbRowsInTile"] * self.MbHeight
-        tile_width  =  self.configs["numMbColsInTile"] * self.MbWidth 
+        tile_height =  self.configs["numMbRowsInTile"] * self.blkHeight
+        tile_width  =  self.configs["numMbColsInTile"] * self.blkWidth 
         # print(f"Creating tile recon buffer of size {tile_height} X {tile_width} for component {configs['cIdx']}")
         self.tile_recon_buffer = np.zeros((tile_height,tile_width), dtype=np.uint16)
 
@@ -130,14 +130,9 @@ class TileComp:
                             rec_block[ix,jy] = self.clip(0, max_val, val + mid_val)
 
                     #Store data in local memory
-                    if hasattr(self, 'tile_recon_buffer') and self.tile_recon_buffer is not None:
-                        for i in range(self.TrSize):
-                            for j in range(self.TrSize):
-                                yy = yMb // self.subH + y + i
-                                xx = xMb // self.subW + x + j
-                                if 0 <= yy < self.tile_recon_buffer.shape[0] and 0 <= xx < self.tile_recon_buffer.shape[1]:
-                                    # print(f"                    Writing into frame buffer component value {self.clip(0, 255, rec_block[i, j])}")
-                                    self.tile_recon_buffer[yy, xx] = rec_block[i, j]
+                    yy0 = yMb // self.subH + y
+                    xx0 = xMb // self.subW + x
+                    self.tile_recon_buffer[yy0:yy0+self.TrSize, xx0:xx0+self.TrSize] = rec_block
 
     def dump_data(self):
         return self.tile_recon_buffer
