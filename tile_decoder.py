@@ -39,7 +39,7 @@ class TileComp:
             # print(f"                macroblock_layer at xMb={xMb}, yMb={yMb} {i}/{numMbsInTile} - MB={self.blkHeight} x {self.blkWidth} ")
 
 
-            self.TransCoeff = np.zeros((self.TrSize, self.TrSize), dtype=np.int32)
+            self.TransCoeff = np.zeros((self.TrSize, self.TrSize), dtype=np.int16)
 
             for y in range(0, self.blkHeight, self.TrSize):
                 for x in range(0, self.blkWidth, self.TrSize):
@@ -139,7 +139,8 @@ class TileComp:
     def clip(self, min_val, max_val, val):
         return max(min_val, min(max_val, val))
 
-    def scale_transform_coefficients(self, coeff_block):
+    def scale_transform_coefficients(self, coeff_block_):
+        coeff_block = coeff_block_.astype(np.int32) 
         bdShift = self.BitDepth  - 2 #+ ((3 + 3) // 2) - 5
         levelScale = [40, 45, 51, 57, 64, 71]
         scale  = levelScale[self.qp % 6]
@@ -148,7 +149,7 @@ class TileComp:
  
         val = (coeff_block * self.QMatrix * scale) << shift
         d   = (val + bdOffset) >> bdShift
-        return np.clip(-32768, 32767, d).astype(np.int32) 
+        return np.clip(-32768, 32767, d).astype(np.int16) 
 
     def inverse_transform(self, block):
         transMatrix = np.array([
